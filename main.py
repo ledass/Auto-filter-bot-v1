@@ -1,7 +1,8 @@
 import logging
-import logging.config
 import asyncio
+import os
 
+from aiohttp import web
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 
@@ -17,6 +18,58 @@ logging.basicConfig(
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+# ── Web server port (Render/Koyeb inject PORT env var) ────────────────────────
+PORT = int(os.environ.get("PORT", 8080))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Tiny aiohttp app – keeps the dyno/container alive
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def health(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok", "bot": "running"})
+
+
+async def home(request: web.Request) -> web.Response:
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>MediaSearchBot</title>
+  <style>
+    body { margin:0; display:flex; justify-content:center; align-items:center;
+           min-height:100vh; background:#0d1117; font-family:sans-serif; color:#e6edf3; }
+    .card { text-align:center; padding:40px; border:1px solid #30363d;
+            border-radius:12px; background:#161b22; max-width:400px; }
+    h1 { font-size:2rem; margin-bottom:8px; }
+    p  { color:#8b949e; }
+    .badge { display:inline-block; margin-top:20px; padding:8px 20px;
+             background:#238636; border-radius:6px; color:#fff;
+             text-decoration:none; font-weight:600; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🎬 MediaSearchBot</h1>
+    <p>Telegram media search bot is <strong style="color:#3fb950">online</strong> and running.</p>
+    <a class="badge" href="/health">Health Check</a>
+  </div>
+</body>
+</html>"""
+    return web.Response(text=html, content_type="text/html")
+
+
+def build_web_app() -> web.Application:
+    app = web.Application()
+    app.router.add_get("/", home)
+    app.router.add_get("/health", health)
+    return app
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Pyrogram Bot
+# ─────────────────────────────────────────────────────────────────────────────
 
 class Bot(Client):
     def __init__(self):
@@ -36,8 +89,8 @@ class Bot(Client):
         await Media.ensure_indexes()
         me = await self.get_me()
         self.username = "@" + me.username
-        self.mention = me.mention
-        logger.info(f"✅ {me.first_name} started as {self.username}")
+        self.mention  = me.mention
+        logger.info("✅ %s started as %s", me.first_name, self.username)
 
         if LOG_CHANNEL:
             try:
@@ -47,14 +100,32 @@ class Bot(Client):
                     f"<code>Username:</code> {self.username}"
                 )
             except Exception as e:
-                logger.warning(f"Could not send startup message to log channel: {e}")
+                logger.warning("Log channel error: %s", e)
 
     async def stop(self, *args):
         await super().stop()
         logger.info("Bot stopped.")
 
 
-app = Bot()
+# ─────────────────────────────────────────────────────────────────────────────
+#  Run both concurrently
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def main():
+    bot    = Bot()
+    webapp = build_web_app()
+    runner = web.AppRunner(webapp)
+
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+
+    await bot.start()
+    await site.start()
+    logger.info("🌐 Web server listening on port %d", PORT)
+
+    # Keep running forever – no sleep(x) that would pause the event loop
+    await asyncio.Event().wait()
+
 
 if __name__ == "__main__":
-    app.run()
+    asyncio.run(main())
