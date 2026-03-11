@@ -1,5 +1,5 @@
 """
-plugins/start.py  –  /start command handler
+plugins/start.py  –  /start command + deep-link file delivery
 """
 
 import logging
@@ -20,62 +20,47 @@ from pyrogram.errors import (
     ChannelPrivate,
 )
 
-from config import START_MSG, FORCE_SUB_MSG, AUTH_CHANNEL, AUTH_USERS
+from config import START_MSG, FORCE_SUB_MSG, AUTH_CHANNEL
 
 logger = logging.getLogger(__name__)
 
-# Cache invite link so we don't call the API on every failed sub check
 _invite_cache: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Force-subscribe helper
+#  Shared helpers (imported by search.py, admin.py, inline.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def is_subscribed(bot: Client, user_id: int) -> bool:
-    """
-    Return True if the user is a member of AUTH_CHANNEL.
-    Always returns True when AUTH_CHANNEL is not set.
-    """
     if not AUTH_CHANNEL:
         return True
     try:
         member = await bot.get_chat_member(AUTH_CHANNEL, user_id)
-        return member.status not in (
-            ChatMemberStatus.BANNED,
-            ChatMemberStatus.LEFT,
-        )
+        return member.status not in (ChatMemberStatus.BANNED, ChatMemberStatus.LEFT)
     except UserNotParticipant:
         return False
     except (PeerIdInvalid, ChannelInvalid, ChannelPrivate) as e:
-        # Channel peer not cached yet – log a clear message and fail open
-        # so users aren't blocked by a misconfigured AUTH_CHANNEL
         logger.error(
-            "AUTH_CHANNEL peer could not be resolved (%s). "
-            "Make sure the bot is a member/admin of the channel and "
-            "that the ID format is correct (e.g. -100XXXXXXXXXX). "
-            "Temporarily allowing user %s.",
-            e, user_id
+            "AUTH_CHANNEL peer unresolved (%s). Allowing user %s.", e, user_id
         )
-        return True   # fail-open: don't lock out everyone on bad config
+        return True
     except Exception as e:
-        logger.exception("is_subscribed unexpected error: %s", e)
-        return True   # fail-open on unknown errors
+        logger.exception("is_subscribed error: %s", e)
+        return True
 
 
 async def _get_invite(bot: Client) -> str:
-    """Return a join link for AUTH_CHANNEL (cached after first call)."""
     global _invite_cache
     if _invite_cache:
         return _invite_cache
     try:
         chat = await bot.get_chat(AUTH_CHANNEL)
-        if chat.username:
-            _invite_cache = f"https://t.me/{chat.username}"
-        else:
-            _invite_cache = await bot.export_chat_invite_link(AUTH_CHANNEL)
+        _invite_cache = (
+            f"https://t.me/{chat.username}" if chat.username
+            else await bot.export_chat_invite_link(AUTH_CHANNEL)
+        )
     except ChatAdminRequired:
-        _invite_cache = "https://t.me"   # fallback
+        _invite_cache = "https://t.me"
     except Exception as e:
         logger.warning("Could not get invite link: %s", e)
         _invite_cache = "https://t.me"
@@ -83,62 +68,81 @@ async def _get_invite(bot: Client) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  /start
+#  /start  –  plain start  OR  deep-link file delivery
+#
+#  Deep-link format:  /start <file_id>
+#  Sent by group search buttons:  t.me/bot?start=<file_id>
 # ─────────────────────────────────────────────────────────────────────────────
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start(bot: Client, message: Message):
     user = message.from_user
+    args = message.command[1] if len(message.command) > 1 else None
 
-    # Deep-link: /start subscribe  →  show join prompt regardless
-    if len(message.command) > 1 and message.command[1] == "subscribe":
-        invite = await _get_invite(bot)
+    # ── Deep-link: /start subscribe ──────────────────────────────────────────
+    if args == "subscribe":
+        invite  = await _get_invite(bot)
         buttons = [[InlineKeyboardButton("✅ Join Channel", url=invite)]]
-        return await message.reply(
-            FORCE_SUB_MSG,
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        return await message.reply(FORCE_SUB_MSG, reply_markup=InlineKeyboardMarkup(buttons))
 
-    # Force-subscribe check
+    # ── Deep-link: /start <file_id>  →  send the file ────────────────────────
+    if args and args not in ("start", "help"):
+        # Force-subscribe check before sending file
+        if not await is_subscribed(bot, user.id):
+            invite  = await _get_invite(bot)
+            buttons = [[InlineKeyboardButton("✅ Join Channel", url=invite)]]
+            return await message.reply(
+                FORCE_SUB_MSG + "\n\n<i>After joining, tap the file button again.</i>",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        # Import here to avoid circular import
+        from plugins.search import send_file_to_user
+        await message.reply("📤 <b>Fetching your file…</b>")
+        await send_file_to_user(bot, user.id, args)
+        return
+
+    # ── Normal /start ─────────────────────────────────────────────────────────
     if not await is_subscribed(bot, user.id):
-        invite = await _get_invite(bot)
+        invite  = await _get_invite(bot)
         buttons = [[InlineKeyboardButton("✅ Join Channel", url=invite)]]
-        return await message.reply(
-            FORCE_SUB_MSG,
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        return await message.reply(FORCE_SUB_MSG, reply_markup=InlineKeyboardMarkup(buttons))
 
     buttons = [
         [
             InlineKeyboardButton("🔍 Search Here", switch_inline_query_current_chat=""),
-            InlineKeyboardButton("🌐 Go Inline", switch_inline_query=""),
+            InlineKeyboardButton("🌐 Go Inline",   switch_inline_query=""),
         ],
         [InlineKeyboardButton("❓ How to Use", callback_data="help")],
     ]
     text = START_MSG.format(
-        mention=user.mention,
-        username=bot.username.lstrip("@"),
-        first_name=user.first_name,
+        mention    = user.mention,
+        username   = bot.username.lstrip("@"),
+        first_name = user.first_name,
     )
     await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Help callback
+#  Help / Back callbacks
 # ─────────────────────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^help$"))
 async def help_cb(bot: Client, query: CallbackQuery):
     text = (
         "📖 <b>How to Use</b>\n\n"
-        "1️⃣ Just <b>type any movie/file name</b> in this chat.\n"
-        "2️⃣ The bot shows results as buttons – tap to get the file!\n"
-        "3️⃣ Use <b>◀ Prev</b> / <b>Next ▶</b> to browse pages.\n\n"
+        "1️⃣ <b>In this chat:</b> just type a movie/file name.\n"
+        "2️⃣ <b>In any group:</b> type the name → tap a result → I'll send it here in PM!\n"
+        "3️⃣ Use <b>◀ PREV</b> / <b>NEXT ▶</b> to browse pages.\n\n"
         "🔎 <b>Filter by type:</b> <code>movie name | video</code>\n"
-        "🌐 <b>Inline mode:</b> type <code>@{username} name</code> anywhere."
+        "🌐 <b>Inline mode:</b> <code>@{username} name</code> in any chat.\n\n"
+        "⚠️ <b>Files auto-delete after a few minutes</b> — forward to "
+        "<a href='https://t.me/me'>Saved Messages</a> to keep them!"
     ).format(username=bot.username.lstrip("@"))
-    back = [[InlineKeyboardButton("⬅️ Back", callback_data="back_start")]]
-    await query.message.edit(text, reply_markup=InlineKeyboardMarkup(back))
+    await query.message.edit(
+        text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_start")]]),
+    )
 
 
 @Client.on_callback_query(filters.regex(r"^back_start$"))
@@ -147,13 +151,13 @@ async def back_start_cb(bot: Client, query: CallbackQuery):
     buttons = [
         [
             InlineKeyboardButton("🔍 Search Here", switch_inline_query_current_chat=""),
-            InlineKeyboardButton("🌐 Go Inline", switch_inline_query=""),
+            InlineKeyboardButton("🌐 Go Inline",   switch_inline_query=""),
         ],
         [InlineKeyboardButton("❓ How to Use", callback_data="help")],
     ]
     text = START_MSG.format(
-        mention=user.mention,
-        username=bot.username.lstrip("@"),
-        first_name=user.first_name,
+        mention    = user.mention,
+        username   = bot.username.lstrip("@"),
+        first_name = user.first_name,
     )
     await query.message.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
