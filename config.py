@@ -21,7 +21,7 @@ USERBOT_STRING = environ.get("USERBOT_STRING_SESSION", "")
 # ── Database ─────────────────────────────────────────────────────────────────
 DATABASE_URI     = environ["DATABASE_URI"]
 DATABASE_NAME    = environ.get("DATABASE_NAME", "MediaSearchDB")
-COLLECTION_NAME  = environ.get("COLLECTION_NAME", "Telegram_files")
+COLLECTION_NAME  = environ.get("COLLECTION_NAME", "tgfls")
 
 # ── Channels / Admins ────────────────────────────────────────────────────────
 # Space-separated list of channel IDs/usernames to auto-index
