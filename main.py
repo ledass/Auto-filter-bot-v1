@@ -7,7 +7,8 @@ from pyrogram import Client
 from pyrogram.enums import ParseMode
 
 from config import (
-    API_ID, API_HASH, BOT_TOKEN, SESSION, LOG_CHANNEL
+    API_ID, API_HASH, BOT_TOKEN, SESSION, LOG_CHANNEL,
+    AUTH_CHANNEL, CHANNELS,
 )
 from database.db import Media
 
@@ -91,6 +92,23 @@ class Bot(Client):
         self.username = "@" + me.username
         self.mention  = me.mention
         logger.info("✅ %s started as %s", me.first_name, self.username)
+
+        # ── Pre-resolve all peers so Pyrogram caches them ────────────────────
+        # Without this, bot.get_chat_member(numeric_id, ...) raises
+        # "Peer id invalid" because the peer was never "seen" before.
+        peers_to_resolve = list(CHANNELS)
+        if AUTH_CHANNEL:
+            peers_to_resolve.append(AUTH_CHANNEL)
+        if LOG_CHANNEL:
+            peers_to_resolve.append(LOG_CHANNEL)
+
+        for peer in peers_to_resolve:
+            try:
+                await self.get_chat(peer)
+                logger.info("✅ Resolved peer: %s", peer)
+            except Exception as e:
+                logger.warning("⚠️ Could not resolve peer %s: %s", peer, e)
+        # ─────────────────────────────────────────────────────────────────────
 
         if LOG_CHANNEL:
             try:
