@@ -251,76 +251,106 @@ async def _index_to_db(last_msg_id: int, chat, msg, bot: Client):
     deleted     = 0
     no_media    = 0
     unsupported = 0
-    current     = state.CURRENT
+    current     = state.CURRENT   # messages processed counter
+
+    # Pyrogram v2 has no iter_messages – fetch in batches of 200 by ID.
+    # We iterate from last_msg_id down to state.CURRENT (skip offset).
+    BATCH = 200
 
     async with _lock:
         try:
             state.CANCEL = False
 
-            async for message in bot.iter_messages(chat, last_msg_id, state.CURRENT):
+            # Build ID ranges: last_msg_id → state.CURRENT+1 (inclusive)
+            start = last_msg_id
+            stop  = max(0, state.CURRENT)   # skip below this
 
+            while start > stop:
                 if state.CANCEL:
                     await msg.edit(
-                        f"⛔ <b>Indexing cancelled!</b>\n\n"
+                        "⛔ <b>Indexing cancelled!</b>\n\n"
                         + _stats(total_files, duplicate, deleted, no_media, unsupported, errors)
                     )
-                    break
+                    return
 
-                current += 1
+                # Build a batch of IDs (high → low)
+                batch_end = max(stop, start - BATCH)           # exclusive lower bound
+                ids = list(range(start, batch_end, -1))        # [start, start-1, …, batch_end+1]
+                start = batch_end                               # advance pointer
 
-                # Live progress every 20 messages
-                if current % 20 == 0:
-                    await msg.edit_text(
-                        f"⏳ <b>Indexing…</b>\n\n"
-                        f"Fetched: <code>{current}</code>\n"
-                        + _stats(total_files, duplicate, deleted, no_media, unsupported, errors),
-                        reply_markup=InlineKeyboardMarkup(
-                            [[InlineKeyboardButton("⛔ Cancel", callback_data="index_cancel")]]
-                        ),
-                    )
-
-                # Skip empty / non-media
-                if message.empty:
-                    deleted += 1
-                    continue
-                if not message.media:
-                    no_media += 1
-                    continue
-                if message.media not in (
-                    enums.MessageMediaType.VIDEO,
-                    enums.MessageMediaType.AUDIO,
-                    enums.MessageMediaType.DOCUMENT,
-                ):
-                    unsupported += 1
+                # get_messages accepts a list – returns list of Message objects
+                try:
+                    messages = await bot.get_messages(chat, ids)
+                except FloodWait as e:
+                    logger.warning("FloodWait %ds – sleeping", e.value)
+                    await asyncio.sleep(e.value + 1)
+                    messages = await bot.get_messages(chat, ids)
+                except Exception as e:
+                    logger.exception("get_messages error: %s", e)
+                    errors += len(ids)
                     continue
 
-                media = getattr(message, message.media.value, None)
-                if not media:
-                    unsupported += 1
-                    continue
+                for message in messages:
+                    if state.CANCEL:
+                        await msg.edit(
+                            "⛔ <b>Indexing cancelled!</b>\n\n"
+                            + _stats(total_files, duplicate, deleted, no_media, unsupported, errors)
+                        )
+                        return
 
-                media.file_type = message.media.value
-                media.caption   = message.caption
+                    current += 1
 
-                saved = await save_file(media)
-                if saved:
-                    total_files += 1
-                else:
-                    duplicate += 1
+                    # Live progress every 20 messages
+                    if current % 20 == 0:
+                        try:
+                            await msg.edit_text(
+                                f"⏳ <b>Indexing…</b>\n\n"
+                                f"Fetched: <code>{current}</code>\n"
+                                + _stats(total_files, duplicate, deleted, no_media, unsupported, errors),
+                                reply_markup=InlineKeyboardMarkup(
+                                    [[InlineKeyboardButton("⛔ Cancel", callback_data="index_cancel")]]
+                                ),
+                            )
+                        except Exception:
+                            pass
 
-        except FloodWait as e:
-            logger.warning("FloodWait %ds during indexing", e.value)
-            await asyncio.sleep(e.value + 1)
+                    if not message or message.empty:
+                        deleted += 1
+                        continue
+                    if not message.media:
+                        no_media += 1
+                        continue
+                    if message.media not in (
+                        enums.MessageMediaType.VIDEO,
+                        enums.MessageMediaType.AUDIO,
+                        enums.MessageMediaType.DOCUMENT,
+                    ):
+                        unsupported += 1
+                        continue
+
+                    media = getattr(message, message.media.value, None)
+                    if not media:
+                        unsupported += 1
+                        continue
+
+                    media.file_type = message.media.value
+                    media.caption   = message.caption
+
+                    saved = await save_file(media)
+                    if saved:
+                        total_files += 1
+                    else:
+                        duplicate += 1
+
         except Exception as e:
             logger.exception("Index error: %s", e)
             await msg.edit(f"❌ Error: <code>{e}</code>")
             return
 
-        else:
-            await msg.edit(
-                f"✅ <b>Indexing complete!</b>\n\n"
-                + _stats(total_files, duplicate, deleted, no_media, unsupported, errors)
-            )
+        await msg.edit(
+            "✅ <b>Indexing complete!</b>\n\n"
+            + _stats(total_files, duplicate, deleted, no_media, unsupported, errors)
+        )
 
 
 def _stats(files, dup, deleted, no_media, unsupported, errors) -> str:
