@@ -5,17 +5,27 @@ plugins/start.py  –  /start command handler
 import logging
 
 from pyrogram import Client, filters
+from pyrogram.enums import ChatMemberStatus
 from pyrogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
     CallbackQuery,
 )
-from pyrogram.errors import UserNotParticipant
+from pyrogram.errors import (
+    UserNotParticipant,
+    ChatAdminRequired,
+    PeerIdInvalid,
+    ChannelInvalid,
+    ChannelPrivate,
+)
 
 from config import START_MSG, FORCE_SUB_MSG, AUTH_CHANNEL, AUTH_USERS
 
 logger = logging.getLogger(__name__)
+
+# Cache invite link so we don't call the API on every failed sub check
+_invite_cache: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -23,17 +33,53 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def is_subscribed(bot: Client, user_id: int) -> bool:
-    """Return True if user is a member of AUTH_CHANNEL (or if no channel set)."""
+    """
+    Return True if the user is a member of AUTH_CHANNEL.
+    Always returns True when AUTH_CHANNEL is not set.
+    """
     if not AUTH_CHANNEL:
         return True
     try:
         member = await bot.get_chat_member(AUTH_CHANNEL, user_id)
-        return member.status.name not in ("BANNED", "LEFT", "RESTRICTED")
+        return member.status not in (
+            ChatMemberStatus.BANNED,
+            ChatMemberStatus.LEFT,
+        )
     except UserNotParticipant:
         return False
+    except (PeerIdInvalid, ChannelInvalid, ChannelPrivate) as e:
+        # Channel peer not cached yet – log a clear message and fail open
+        # so users aren't blocked by a misconfigured AUTH_CHANNEL
+        logger.error(
+            "AUTH_CHANNEL peer could not be resolved (%s). "
+            "Make sure the bot is a member/admin of the channel and "
+            "that the ID format is correct (e.g. -100XXXXXXXXXX). "
+            "Temporarily allowing user %s.",
+            e, user_id
+        )
+        return True   # fail-open: don't lock out everyone on bad config
     except Exception as e:
-        logger.exception("is_subscribed error: %s", e)
-        return False  # fail-closed
+        logger.exception("is_subscribed unexpected error: %s", e)
+        return True   # fail-open on unknown errors
+
+
+async def _get_invite(bot: Client) -> str:
+    """Return a join link for AUTH_CHANNEL (cached after first call)."""
+    global _invite_cache
+    if _invite_cache:
+        return _invite_cache
+    try:
+        chat = await bot.get_chat(AUTH_CHANNEL)
+        if chat.username:
+            _invite_cache = f"https://t.me/{chat.username}"
+        else:
+            _invite_cache = await bot.export_chat_invite_link(AUTH_CHANNEL)
+    except ChatAdminRequired:
+        _invite_cache = "https://t.me"   # fallback
+    except Exception as e:
+        logger.warning("Could not get invite link: %s", e)
+        _invite_cache = "https://t.me"
+    return _invite_cache
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,25 +90,23 @@ async def is_subscribed(bot: Client, user_id: int) -> bool:
 async def start(bot: Client, message: Message):
     user = message.from_user
 
-    # Force-subscribe check
-    if not await is_subscribed(bot, user.id):
-        channel = await bot.get_chat(AUTH_CHANNEL)
-        invite = (
-            f"https://t.me/{channel.username}"
-            if channel.username
-            else await bot.export_chat_invite_link(AUTH_CHANNEL)
-        )
+    # Deep-link: /start subscribe  →  show join prompt regardless
+    if len(message.command) > 1 and message.command[1] == "subscribe":
+        invite = await _get_invite(bot)
         buttons = [[InlineKeyboardButton("✅ Join Channel", url=invite)]]
-        await message.reply(
+        return await message.reply(
             FORCE_SUB_MSG,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
-        return
 
-    # Deep-link: /start subscribe
-    if len(message.command) > 1 and message.command[1] == "subscribe":
-        await message.reply(FORCE_SUB_MSG)
-        return
+    # Force-subscribe check
+    if not await is_subscribed(bot, user.id):
+        invite = await _get_invite(bot)
+        buttons = [[InlineKeyboardButton("✅ Join Channel", url=invite)]]
+        return await message.reply(
+            FORCE_SUB_MSG,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     buttons = [
         [
