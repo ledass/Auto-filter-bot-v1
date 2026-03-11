@@ -15,9 +15,6 @@ API_ID        = int(environ["API_ID"])
 API_HASH      = environ["API_HASH"]
 BOT_TOKEN     = environ["BOT_TOKEN"]
 
-# Optional: string session of a user-account for /index command
-USERBOT_STRING = environ.get("USERBOT_STRING_SESSION", "")
-
 # ── Database ─────────────────────────────────────────────────────────────────
 DATABASE_URI     = environ["DATABASE_URI"]
 DATABASE_NAME    = environ.get("DATABASE_NAME", "MediaSearchDB")
