@@ -4,7 +4,7 @@ plugins/admin.py  –  Admin commands + channel indexer (bot-only, no userbot ne
 Indexing flow:
   • Admin sends a t.me link or forwards a message from a channel
   • Bot asks for confirmation → Accept / Reject
-  • On accept: bot.iter_messages() indexes all media up to that message ID
+  • On accept: bot.get_messages() in batches indexes all media up to that message ID
   • /setskip N  → start indexing from message N
   • Cancel button aborts mid-index
 """
@@ -19,7 +19,7 @@ from pyrogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, MessageNotModified
 from pyrogram.errors.exceptions.bad_request_400 import (
     ChannelInvalid, ChatAdminRequired,
     UsernameInvalid, UsernameNotModified,
@@ -27,6 +27,49 @@ from pyrogram.errors.exceptions.bad_request_400 import (
 
 from config import ADMINS, CHANNELS, LOG_CHANNEL
 from database.db import Media, save_file
+
+logger = logging.getLogger(__name__)
+_lock = asyncio.Lock()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  FloodWait-safe wrappers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def safe_edit(msg, text: str, reply_markup=None):
+    """Edit a message, handling FloodWait by sleeping then retrying once."""
+    for attempt in range(2):
+        try:
+            kwargs = {"text": text}
+            if reply_markup:
+                kwargs["reply_markup"] = reply_markup
+            return await msg.edit(**kwargs)
+        except FloodWait as e:
+            if attempt == 0:
+                logger.warning("FloodWait %ds on edit – sleeping", e.value)
+                await asyncio.sleep(min(e.value, 30))
+            else:
+                logger.error("FloodWait persists on edit, giving up: %s", e)
+        except MessageNotModified:
+            pass
+        except Exception as e:
+            logger.warning("safe_edit error: %s", e)
+            break
+
+
+async def safe_reply(message, text: str, reply_markup=None):
+    """Reply to a message, handling FloodWait."""
+    for attempt in range(2):
+        try:
+            return await message.reply(text, reply_markup=reply_markup)
+        except FloodWait as e:
+            if attempt == 0:
+                logger.warning("FloodWait %ds on reply – sleeping", e.value)
+                await asyncio.sleep(min(e.value, 30))
+            else:
+                logger.error("FloodWait persists on reply, giving up: %s", e)
+        except Exception as e:
+            logger.warning("safe_reply error: %s", e)
+            break
 
 logger = logging.getLogger(__name__)
 _lock = asyncio.Lock()
@@ -256,6 +299,9 @@ async def _index_to_db(last_msg_id: int, chat, msg, bot: Client):
     # Pyrogram v2 has no iter_messages – fetch in batches of 200 by ID.
     # We iterate from last_msg_id down to state.CURRENT (skip offset).
     BATCH = 200
+    # Track last edit time to avoid editing too frequently (min 5s between edits)
+    import time
+    last_edit_ts = 0.0
 
     async with _lock:
         try:
@@ -263,28 +309,35 @@ async def _index_to_db(last_msg_id: int, chat, msg, bot: Client):
 
             # Build ID ranges: last_msg_id → state.CURRENT+1 (inclusive)
             start = last_msg_id
-            stop  = max(0, state.CURRENT)   # skip below this
+            stop  = max(0, state.CURRENT)
 
             while start > stop:
                 if state.CANCEL:
-                    await msg.edit(
+                    await safe_edit(
+                        msg,
                         "⛔ <b>Indexing cancelled!</b>\n\n"
                         + _stats(total_files, duplicate, deleted, no_media, unsupported, errors)
                     )
                     return
 
                 # Build a batch of IDs (high → low)
-                batch_end = max(stop, start - BATCH)           # exclusive lower bound
-                ids = list(range(start, batch_end, -1))        # [start, start-1, …, batch_end+1]
-                start = batch_end                               # advance pointer
+                batch_end = max(stop, start - BATCH)
+                ids       = list(range(start, batch_end, -1))
+                start     = batch_end
 
-                # get_messages accepts a list – returns list of Message objects
+                # Fetch batch
                 try:
                     messages = await bot.get_messages(chat, ids)
                 except FloodWait as e:
-                    logger.warning("FloodWait %ds – sleeping", e.value)
-                    await asyncio.sleep(e.value + 1)
-                    messages = await bot.get_messages(chat, ids)
+                    wait = e.value + 2
+                    logger.warning("FloodWait %ds on get_messages – sleeping", wait)
+                    await asyncio.sleep(wait)
+                    try:
+                        messages = await bot.get_messages(chat, ids)
+                    except Exception as e2:
+                        logger.error("Retry failed: %s", e2)
+                        errors += len(ids)
+                        continue
                 except Exception as e:
                     logger.exception("get_messages error: %s", e)
                     errors += len(ids)
@@ -292,27 +345,14 @@ async def _index_to_db(last_msg_id: int, chat, msg, bot: Client):
 
                 for message in messages:
                     if state.CANCEL:
-                        await msg.edit(
+                        await safe_edit(
+                            msg,
                             "⛔ <b>Indexing cancelled!</b>\n\n"
                             + _stats(total_files, duplicate, deleted, no_media, unsupported, errors)
                         )
                         return
 
                     current += 1
-
-                    # Live progress every 20 messages
-                    if current % 20 == 0:
-                        try:
-                            await msg.edit_text(
-                                f"⏳ <b>Indexing…</b>\n\n"
-                                f"Fetched: <code>{current}</code>\n"
-                                + _stats(total_files, duplicate, deleted, no_media, unsupported, errors),
-                                reply_markup=InlineKeyboardMarkup(
-                                    [[InlineKeyboardButton("⛔ Cancel", callback_data="index_cancel")]]
-                                ),
-                            )
-                        except Exception:
-                            pass
 
                     if not message or message.empty:
                         deleted += 1
@@ -342,12 +382,28 @@ async def _index_to_db(last_msg_id: int, chat, msg, bot: Client):
                     else:
                         duplicate += 1
 
+                # Update progress once per batch (≤1 edit per ~200 messages)
+                # and only if at least 5 seconds have passed since last edit
+                now = time.time()
+                if now - last_edit_ts >= 5:
+                    await safe_edit(
+                        msg,
+                        f"⏳ <b>Indexing…</b>\n\n"
+                        f"Fetched: <code>{current}</code>\n"
+                        + _stats(total_files, duplicate, deleted, no_media, unsupported, errors),
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("⛔ Cancel", callback_data="index_cancel")]]
+                        ),
+                    )
+                    last_edit_ts = time.time()
+
         except Exception as e:
             logger.exception("Index error: %s", e)
-            await msg.edit(f"❌ Error: <code>{e}</code>")
+            await safe_edit(msg, f"❌ Error: <code>{e}</code>")
             return
 
-        await msg.edit(
+        await safe_edit(
+            msg,
             "✅ <b>Indexing complete!</b>\n\n"
             + _stats(total_files, duplicate, deleted, no_media, unsupported, errors)
         )
@@ -370,18 +426,20 @@ def _stats(files, dup, deleted, no_media, unsupported, errors) -> str:
 
 @Client.on_message(filters.command("total") & filters.user(ADMINS))
 async def total_files(bot: Client, message: Message):
-    msg = await message.reply("⏳ Counting…")
+    msg = await safe_reply(message, "⏳ Counting…")
+    if not msg:
+        return
     try:
         n = await Media.count_documents()
-        await msg.edit(f"📦 <b>Total files in database:</b> <code>{n}</code>")
+        await safe_edit(msg, f"📦 <b>Total files in database:</b> <code>{n}</code>")
     except Exception as e:
-        await msg.edit(f"Error: {e}")
+        await safe_edit(msg, f"Error: <code>{e}</code>")
 
 
 @Client.on_message(filters.command("channel") & filters.user(ADMINS))
 async def channel_info(bot: Client, message: Message):
     if not CHANNELS:
-        return await message.reply("No channels configured.")
+        return await safe_reply(message, "No channels configured.")
     lines = ["📑 <b>Watched Channels</b>\n"]
     for ch in CHANNELS:
         try:
@@ -393,36 +451,49 @@ async def channel_info(bot: Client, message: Message):
     lines.append(f"\n<b>Total:</b> {len(CHANNELS)}")
     text = "\n".join(lines)
     if len(text) < 4096:
-        await message.reply(text)
+        await safe_reply(message, text)
     else:
         path = "/tmp/channels.txt"
         with open(path, "w") as f:
             f.write(text)
-        await message.reply_document(path)
-        os.remove(path)
+        try:
+            await message.reply_document(path)
+        except FloodWait as e:
+            await asyncio.sleep(min(e.value, 30))
+            await message.reply_document(path)
+        finally:
+            os.remove(path)
 
 
 @Client.on_message(filters.command("delete") & filters.user(ADMINS))
 async def delete_file_cmd(bot: Client, message: Message):
     reply = message.reply_to_message
     if not (reply and reply.media):
-        return await message.reply("⚠️ Reply to a media file with /delete.")
-    msg = await message.reply("⏳ Processing…")
+        return await safe_reply(message, "⚠️ Reply to a media file with /delete.")
+    msg = await safe_reply(message, "⏳ Processing…")
+    if not msg:
+        return
     for ftype in ("document", "video", "audio"):
         media = getattr(reply, ftype, None)
         if media:
             result = await Media.delete_one({"file_name": media.file_name, "file_size": media.file_size})
             if result.deleted_count:
-                return await msg.edit("✅ Removed from database.")
-            return await msg.edit("❌ File not found in database.")
-    await msg.edit("⚠️ Unsupported file type.")
+                return await safe_edit(msg, "✅ Removed from database.")
+            return await safe_edit(msg, "❌ File not found in database.")
+    await safe_edit(msg, "⚠️ Unsupported file type.")
 
 
 @Client.on_message(filters.command(["logs", "logger"]) & filters.user(ADMINS))
 async def send_logs(bot: Client, message: Message):
     try:
         await message.reply_document("TelegramBot.log")
+    except FloodWait as e:
+        await asyncio.sleep(min(e.value, 30))
+        try:
+            await message.reply_document("TelegramBot.log")
+        except Exception as e2:
+            await safe_reply(message, f"FloodWait active, try again later: <code>{e2}</code>")
     except FileNotFoundError:
-        await message.reply("No log file found.")
+        await safe_reply(message, "No log file found.")
     except Exception as e:
-        await message.reply(str(e))
+        await safe_reply(message, str(e))
