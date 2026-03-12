@@ -20,9 +20,62 @@ from config import DATABASE_URI, DATABASE_NAME, COLLECTION_NAME, USE_CAPTION_FIL
 logger = logging.getLogger(__name__)
 
 # ── Motor client ──────────────────────────────────────────────────────────────
-_client   = AsyncIOMotorClient(DATABASE_URI)
-_db       = _client[DATABASE_NAME]
-_col      = _db[COLLECTION_NAME]
+_client    = AsyncIOMotorClient(DATABASE_URI)
+_db        = _client[DATABASE_NAME]
+_col       = _db[COLLECTION_NAME]
+_users_col = _db["users"]          # ← separate collection for user registry
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  User registry
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Users:
+    """Save and query bot users for broadcast."""
+
+    collection = _users_col
+
+    @classmethod
+    async def ensure_indexes(cls):
+        await _users_col.create_index([("user_id", ASCENDING)], unique=True, background=True)
+
+    @classmethod
+    async def add(cls, user) -> bool:
+        """
+        Upsert a Pyrogram User object.
+        Returns True if newly inserted, False if already existed (just updated).
+        """
+        from datetime import datetime, timezone
+        doc = {
+            "user_id":    user.id,
+            "first_name": user.first_name or "",
+            "last_name":  user.last_name  or "",
+            "username":   user.username   or "",
+            "is_bot":     user.is_bot,
+            "last_seen":  datetime.now(timezone.utc),
+        }
+        result = await _users_col.update_one(
+            {"user_id": user.id},
+            {"$set": doc, "$setOnInsert": {"joined": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+        return result.upserted_id is not None   # True = new user
+
+    @classmethod
+    async def get_all_ids(cls) -> list[int]:
+        """Return list of all saved user_ids."""
+        cursor = _users_col.find({}, {"user_id": 1, "_id": 0})
+        docs   = await cursor.to_list(length=None)
+        return [d["user_id"] for d in docs]
+
+    @classmethod
+    async def count(cls) -> int:
+        return await _users_col.count_documents({})
+
+    @classmethod
+    async def remove(cls, user_id: int):
+        """Remove a user (e.g. they blocked the bot)."""
+        await _users_col.delete_one({"user_id": user_id})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,6 +130,7 @@ class Media:
         """Create indexes on first run (idempotent)."""
         await _col.create_index([("file_name", TEXT)], background=True)
         await _col.create_index([("file_id", ASCENDING)], unique=True, background=True)
+        await Users.ensure_indexes()
         logger.info("DB indexes ensured.")
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
@@ -192,3 +246,8 @@ async def get_search_results(query, file_type=None, max_results=10, offset=0):
 
 async def delete_file(filt: dict):
     return await Media.delete_one(filt)
+
+
+# make Users importable from database.db directly
+__all__ = ["Media", "Users", "save_file", "get_search_results", "delete_file",
+           "_col", "_users_col"]
