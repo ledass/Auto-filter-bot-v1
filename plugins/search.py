@@ -8,7 +8,7 @@ Group flow:
   User types name → result buttons shown IN GROUP with URL deep-links
   User taps file  → redirected to bot PM via  t.me/bot?start=<file_id>
   /start handler  → detects file_id, sends file → auto-delete
-  Pagination (◀  /  ▶) still works in group via callbacks
+  Pagination (◀ PREV / NEXT ▶) still works in group via callbacks
 """
 
 import asyncio
@@ -116,7 +116,7 @@ def _build_keyboard(
     rows.append(nav)
 
     #rows.append([InlineKeyboardButton(
-     #   "🔎 New Search", switch_inline_query_current_chat=query
+      #  "🔎 New Search", switch_inline_query_current_chat=query
     #)])
     return InlineKeyboardMarkup(rows)
 
@@ -210,9 +210,21 @@ async def send_file_to_user(bot: Client, user_id: int, file_id: str):
         )
         asyncio.create_task(_schedule_delete(sent, timer, delay=AUTO_DELETE_TIME))
 
+    except FloodWait as e:
+        # NEVER send another message during FloodWait — it cascades into a longer ban
+        logger.warning(
+            "FloodWait %ds while sending file to %s — skipping error message to avoid cascade",
+            e.value, user_id
+        )
     except Exception as e:
         logger.exception("send_file_to_user error: %s", e)
-        await bot.send_message(user_id, f"❌ Failed to send file: <code>{e}</code>")
+        # Only attempt error message if it's NOT a FloodWait-related error
+        try:
+            await bot.send_message(user_id, f"❌ Failed to send file: <code>{e}</code>")
+        except FloodWait:
+            pass  # still rate limited — silently drop
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
