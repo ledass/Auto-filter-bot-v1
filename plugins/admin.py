@@ -497,3 +497,20 @@ async def send_logs(bot: Client, message: Message):
         await safe_reply(message, "No log file found.")
     except Exception as e:
         await safe_reply(message, str(e))
+
+
+@Client.on_message(filters.command("users") & filters.user(ADMINS))
+async def total_users(bot: Client, message: Message):
+    from database.db import Users
+    msg = await safe_reply(message, "⏳ Counting users…")
+    if not msg:
+        return
+    try:
+        n = await Users.count()
+        await safe_edit(
+            msg,
+            f"👥 <b>Total registered users:</b> <code>{n}</code>\n\n"
+            f"Use /broadcast to send a message to all of them."
+        )
+    except Exception as e:
+        await safe_edit(msg, f"Error: <code>{e}</code>")
