@@ -1,4 +1,4 @@
-# 🎬 MediaSearchBot
+# 🎬 auto-filter-bot-v1
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white"/>
@@ -81,8 +81,8 @@ Bot:
 
 ### Manual / VPS
 ```bash
-git clone https://github.com/GouthamSER/MediaSearchBot
-cd MediaSearchBot
+git clone https://github.com/GouthamSER/auto-filter-bot-v1
+cd auto-filter-bot-v1
 pip install -r requirements.txt
 cp sample.env .env
 # Edit .env with your values
@@ -102,18 +102,19 @@ python main.py
 | `DATABASE_URI` | MongoDB connection string (e.g. `mongodb+srv://...`) |
 | `ADMINS` | Space-separated Telegram user IDs — e.g. `123456 789012` |
 | `CHANNELS` | Space-separated channel IDs the bot watches — e.g. `-100123 -100456` |
+| `LOG_CHANNEL` | — | Channel ID for bot startup/log messages |
+| `DATABASE_NAME` | `MediaSearchDB` | MongoDB database name |
+| `COLLECTION_NAME` | `Telegram_files` | MongoDB collection name |
 
 ### Optional
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_NAME` | `MediaSearchDB` | MongoDB database name |
-| `COLLECTION_NAME` | `Telegram_files` | MongoDB collection name |
+
 | `SESSION` | `MediaSearchBot` | Pyrogram session name |
 | `MAX_RESULTS` | `10` | Files shown per page |
 | `AUTO_DELETE_TIME` | `300` | Seconds before file is deleted (300 = 5 min) |
 | `USE_CAPTION_FILTER` | `false` | Also search inside file captions |
 | `AUTH_CHANNEL` | — | Force users to join this channel ID before using bot |
-| `LOG_CHANNEL` | — | Channel ID for bot startup/log messages |
 | `PORT` | `8080` | Web server port (auto-set by Render/Koyeb) |
 
 ### Custom Messages (Optional)
@@ -124,42 +125,6 @@ python main.py
 
 ---
 
-## 📥 Indexing Channels
-
-### Method 1 — Bot Command (while running)
-```
-/index -100123456789
-/index -100123456789 -100987654321   ← multiple channels at once
-```
-The bot indexes using its own account — **no userbot/string session needed.**
-
-### Method 2 — Standalone Indexer
-```bash
-# Index all channels from CHANNELS env var
-python index.py
-
-# Index specific channels
-python index.py -100123456789 @mychannel
-
-# With options
-python index.py --delay 0.5 --limit 1000 -100123456789
-```
-
-**Indexer options:**
-| Flag | Default | Description |
-|---|---|---|
-| `--delay N` | `0.5` | Seconds between requests (avoid flood) |
-| `--limit N` | `0` | Max files per channel, `0` = unlimited |
-
-### /setskip command
-Resume an interrupted index from a specific message number:
-```
-/setskip 5000
-/index -100123456789
-```
-Bot will skip the first 5000 messages and continue from there.
-
----
 
 ## 🤖 Bot Commands
 
