@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  A powerful Telegram media search bot — search movies and files directly in PM or any group, with paginated results, auto-delete, and deep-link file delivery.
+  A powerful Telegram media search bot — search movies and files directly in PM or any group, with paginated results, auto-delete, broadcast, user tracking, and deep-link file delivery.
 </p>
 
 ---
@@ -18,13 +18,15 @@
 | Feature | Description |
 |---|---|
 | 💬 **PM Search** | Type any name → paginated file buttons → tap to receive instantly |
-| 👥 **Group Search** | Results shown in group → tap → redirected to bot PM → file delivered |
-| 🔗 **Deep-Link Delivery** | Group buttons use `t.me/bot?start=<file_id>` — no "start bot first" errors |
-| ◀▶ **Prev / Next Pages** | AutoFilterBot-style pagination with page counter |
+| 👥 **Group Search** | Results shown in group → tap → file delivered to your PM via deep-link |
+| 🔗 **Deep-Link Delivery** | Group buttons use `t.me/bot?start=<file_id>` — works even if user never started bot |
+| ◀▶ **Prev / Next Pages** | AutoFilterBot-style pagination with live page counter |
 | 🗑 **Auto-Delete** | Files auto-delete after configurable time to avoid copyright issues |
 | 📌 **Save Reminder** | Users instructed to forward to Saved Messages before deletion |
-| 📡 **Auto Index** | New files posted in watched channels are saved to DB instantly |
-| 🛠 **Admin Commands** | `/index`, `/setskip`, `/total`, `/delete`, `/channel`, `/logs` |
+| 👤 **User Tracking** | Every `/start` user is saved to DB; new users trigger a log channel notification |
+| 📢 **Broadcast** | Send any message (text, photo, video, etc.) to all registered users |
+| 📡 **Auto Index** | New files posted in watched channels saved to DB instantly |
+| 🛠 **Admin Commands** | Full suite: `/index`, `/setskip`, `/total`, `/users`, `/broadcast`, `/delete`, `/channel`, `/logs` |
 | 🌐 **Inline Mode** | Search via `@bot query` in any chat |
 | 🔒 **Force Subscribe** | Optionally require users to join a channel before access |
 | 🌍 **Always Alive** | Built-in `aiohttp` web server — compatible with Render & Koyeb (no sleep) |
@@ -45,7 +47,7 @@ Bot:
   [1.59 GB]- 🎬 -Kumki 2 (2025) Tamil HQ HDRip 1080p HEVC x…
   [1.38 GB]- 🎬 -Kumki 2 (2025) Tamil HQ HDRip 720p x264 (D…
   [904.43 MB]- 🎬 -Kumki 2 (2025) Tamil HQ HDRip 720p HEVC …
-  ──────────────────────────────
+  ──────────────────────────────────────────
   [🗂 1/2]   [NEXT ▶]
 ```
 
@@ -59,6 +61,32 @@ Bot:
 📌 Forward it to your Saved Messages to keep it forever!
 
 [💾 Save to Saved Messages]
+```
+
+### New User Notification in Log Channel
+```
+👤 New User Started Bot!
+
+🆔 ID: 123456789
+📛 Name: John Doe
+🔗 Username: @johndoe
+📅 Joined: 12 Mar 2026 • 10:45 UTC
+
+👥 Total Users: 142
+```
+
+### Broadcast Progress
+```
+📢 Broadcasting…
+
+[████░░░░░░] 40%
+Done: 400/1000
+
+✅ Sent: 385
+🚫 Blocked: 12  ← auto-removed from DB
+❌ Failed: 3
+
+[⛔ Cancel]
 ```
 
 ---
@@ -102,14 +130,13 @@ python main.py
 | `DATABASE_URI` | MongoDB connection string (e.g. `mongodb+srv://...`) |
 | `ADMINS` | Space-separated Telegram user IDs — e.g. `123456 789012` |
 | `CHANNELS` | Space-separated channel IDs the bot watches — e.g. `-100123 -100456` |
-| `LOG_CHANNEL` | — | Channel ID for bot startup/log messages |
-| `DATABASE_NAME` | `MediaSearchDB` | MongoDB database name |
-| `COLLECTION_NAME` | `Telegram_files` | MongoDB collection name |
+| `LOG_CHANNEL` | Channel ID for bot logs + new user notifications |
 
 ### Optional
 | Variable | Default | Description |
 |---|---|---|
-
+| `DATABASE_NAME` | `MediaSearchDB` | MongoDB database name |
+| `COLLECTION_NAME` | `Telegram_files` | MongoDB collection name |
 | `SESSION` | `MediaSearchBot` | Pyrogram session name |
 | `MAX_RESULTS` | `10` | Files shown per page |
 | `AUTO_DELETE_TIME` | `300` | Seconds before file is deleted (300 = 5 min) |
@@ -125,45 +152,68 @@ python main.py
 
 ---
 
-
 ## 🤖 Bot Commands
 
-| Command | Access | Description |
-|---|---|---|
-| `/start` | Everyone | Welcome message + search buttons |
-| `/total` | Admins | Total files saved in database |
-| `/channel` | Admins | List all watched channels |
-| `/delete` | Admins | Reply to media → removes it from DB |
-| `/index <channel>` | Admins | Bulk-index a channel (bot-only, no userbot) |
-| `/setskip <N>` | Admins | Set message skip offset for indexing |
-| `/logs` | Admins | Download the log file |
+### Everyone
+| Command | Description |
+|---|---|
+| `/start` | Welcome message + search buttons |
+
+### Admins Only
+| Command | Description |
+|---|---|
+| `/total` | Total files saved in database |
+| `/users` | Total registered users count |
+| `/broadcast` | Send a message to all users (reply to any message, or inline text) |
+| `/cancelbroadcast` | Stop a running broadcast mid-way |
+| `/channel` | List all watched channels |
+| `/index <channel_id>` | Bulk-index a channel (bot-only, no userbot needed) |
+| `/setskip <N>` | Set message skip offset for `/index` (resume indexing) |
+| `/delete` | Reply to any media → removes it from DB |
+| `/logs` | Download the log file |
+
+---
+
+## 📢 Broadcast Usage
+
+**Option 1 — Copy any message (photo, video, sticker, text…):**
+```
+Reply to any message with /broadcast
+```
+
+**Option 2 — Inline text only:**
+```
+/broadcast 🎉 New movies added! Go search now!
+```
+
+Bot shows a **preview with recipient count** and **Confirm / Cancel** buttons before sending. Live progress updates during send. Blocked/deactivated users are **automatically removed** from the database.
 
 ---
 
 ## 🔍 Search Tips
 
-- **Basic:** type any movie or file name
+- **Basic:** type any movie or file name in PM or any group
 - **Filter by type:** `movie name | video` or `song name | audio`
 - **Inline anywhere:** `@YourBot movie name` in any chat
 - **Pagination:** tap **◀ PREV** / **NEXT ▶** to browse all results
+- **Group:** results appear in the group; tapping a file delivers it to your PM
 
 ---
 
 ## 📁 Project Structure
 
 ```
-MediaSearchBot/
+auto-filter-bot-v1/
 ├── main.py                 ← Bot entry point + aiohttp web server
 ├── config.py               ← All configuration via environment variables
-├── index.py                ← Standalone channel bulk-indexer
-├── generate_session.py     ← (Unused) Userbot session helper
+├── index.py                ← Standalone channel bulk-indexer (CLI)
 ├── requirements.txt
 ├── Procfile                ← Heroku: worker: python main.py
 ├── sample.env              ← Example environment variables
 │
 ├── database/
 │   ├── __init__.py
-│   └── db.py               ← MongoDB motor operations (no umongo)
+│   └── db.py               ← MongoDB motor (Media + Users collections)
 │
 └── plugins/
     ├── __init__.py
@@ -171,8 +221,19 @@ MediaSearchBot/
     ├── search.py           ← PM & group search, pagination, auto-delete
     ├── inline.py           ← Inline mode search
     ├── channel.py          ← Auto-index new files from watched channels
-    └── admin.py            ← Admin commands + channel indexer (bot-only)
+    ├── users.py            ← User tracking + new user log channel notification
+    ├── broadcast.py        ← /broadcast with live progress + cancel + auto-cleanup
+    └── admin.py            ← Admin commands + bot-only channel indexer
 ```
+
+---
+
+## 🗄 Database Collections
+
+| Collection | Purpose |
+|---|---|
+| `Telegram_files` | All indexed media files (searchable) |
+| `users` | All registered users — used for broadcast & analytics |
 
 ---
 
