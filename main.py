@@ -81,7 +81,7 @@ class Bot(Client):
             bot_token=BOT_TOKEN,
             workers=50,
             plugins={"root": "plugins"},
-            sleep_threshold=5,
+            sleep_threshold=60,  # auto-sleep FloodWaits up to 60s
             parse_mode=ParseMode.HTML,
         )
 
