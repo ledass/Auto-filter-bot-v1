@@ -1,21 +1,65 @@
 """
-plugins/users.py  –  Auto-save every user who interacts with the bot
-
-Registers a high-priority handler (group=-1) that fires on every private
-message or callback_query. The handler just upserts the user to MongoDB
-and then continues — it never blocks or stops the update.
+plugins/users.py  –  Auto-save every user + notify LOG_CHANNEL on new /start
 """
 
 import logging
+from datetime import datetime, timezone
+
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
+from pyrogram.errors import FloodWait
 
+from config import LOG_CHANNEL
 from database.db import Users
 
 logger = logging.getLogger(__name__)
 
 
-# ── Save on any private message ───────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  /start  →  save user + notify LOG_CHANNEL if new
+# ─────────────────────────────────────────────────────────────────────────────
+
+@Client.on_message(filters.command("start") & filters.private & filters.incoming, group=-1)
+async def track_start(bot: Client, message: Message):
+    user = message.from_user
+    if not user or user.is_bot:
+        return
+    try:
+        is_new = await Users.add(user)
+    except Exception as e:
+        logger.warning("Failed to save user %s: %s", getattr(user, "id", "?"), e)
+        return
+
+    if is_new and LOG_CHANNEL:
+        total    = await Users.count()
+        username = f"@{user.username}" if user.username else "—"
+        name     = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        joined   = datetime.now(timezone.utc).strftime("%d %b %Y • %H:%M UTC")
+
+        text = (
+            "👤 <b>New User Started Bot!</b>\n\n"
+            f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
+            f"📛 <b>Name:</b> {name}\n"
+            f"🔗 <b>Username:</b> {username}\n"
+            f"📅 <b>Joined:</b> {joined}\n\n"
+            f"👥 <b>Total Users:</b> <code>{total}</code>"
+        )
+        try:
+            await bot.send_message(LOG_CHANNEL, text)
+        except FloodWait as e:
+            import asyncio
+            await asyncio.sleep(min(e.value, 30))
+            try:
+                await bot.send_message(LOG_CHANNEL, text)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning("Could not notify LOG_CHANNEL for new user: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  All other private messages  →  silently upsert (update last_seen)
+# ─────────────────────────────────────────────────────────────────────────────
 
 @Client.on_message(filters.private & filters.incoming, group=-1)
 async def save_user_on_message(bot: Client, message: Message):
@@ -23,14 +67,14 @@ async def save_user_on_message(bot: Client, message: Message):
     if not user or user.is_bot:
         return
     try:
-        is_new = await Users.add(user)
-        if is_new:
-            logger.info("New user saved: %s (%s)", user.id, user.first_name)
+        await Users.add(user)
     except Exception as e:
         logger.warning("Failed to save user %s: %s", getattr(user, "id", "?"), e)
 
 
-# ── Save on callback queries (covers group users who tap inline buttons) ──────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Callback queries  →  silently upsert
+# ─────────────────────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(group=-1)
 async def save_user_on_callback(bot: Client, query: CallbackQuery):
