@@ -122,9 +122,9 @@ def _build_keyboard(
 
 
 def _search_text(query: str, total: int, in_group: bool = False) -> str:
-    suffix = "\n👇 <i>Tap a file → you'll be taken to my PM where it will be sent!</i>" \
+    suffix = "\n👇 <i>𝗧𝗮𝗽 𝗔 𝗙𝗶𝗹𝗲 → you'll be taken to my PM where it will be sent!</i>" \
              if in_group else \
-             "\n👇 <i>Tap a file name to receive it here:</i>"
+             "\n👇 <i>𝗧𝗮𝗽 𝗔 𝗙𝗶𝗹𝗲 𝗡𝗮𝗺𝗲 𝗧𝗼 𝗥𝗲𝗰𝗲𝗶𝘃𝗲 𝗜𝘁 𝗛𝗲𝗿𝗲:</i>"
     return (
         f"🔎 <b>Results for:</b> <code>{query}</code>\n"
         f"📁 <b>Found:</b> <code>{total}</code> file(s)"
